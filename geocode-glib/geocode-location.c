@@ -234,53 +234,84 @@ parse_geo_uri_special_parameters (GeocodeLocation *loc,
                                   const char      *params,
                                   GError         **error)
 {
-        char *end_ptr;
+        char **parameters;
         char *next_token;
-        char *description;
-        char *token_end;
+        char *end_ptr;
+        char *description_unescaped;
+        char *description = NULL;
         int description_len;
+        int i;
+        int ret = TRUE;
 
-        if (loc->priv->latitude != 0 || loc->priv->longitude != 0)
-            goto err;
-
-        if (strncmp (params, "q=", 2) != 0)
+        /*
+         * documentation is unclear about it, but structure should be
+         * the same as for query strings (using '&' as delimiter)
+         */
+        parameters = g_strsplit (params, "&", 256);
+        if (parameters[0] == NULL)
                 goto err;
 
-        next_token = ((char *)params) + 2;
+        for (i = 0; parameters[i] != NULL; i++) {
+                if (g_str_has_prefix (parameters[i], "q=")) {
+                        if (loc->priv->latitude != 0 || loc->priv->longitude != 0)
+                                goto err;
 
-        loc->priv->latitude = g_ascii_strtod (next_token, &end_ptr);
-        if (*end_ptr != ',' || *end_ptr == *params)
-                goto err;
-        next_token = end_ptr + 1;
+                        if (description != NULL)
+                                goto err;
 
-        loc->priv->longitude = g_ascii_strtod (next_token, &end_ptr);
-        if (*end_ptr == *next_token)
-                goto err;
+                        next_token = ((char *)parameters[i]) + 2;
 
-        if (*end_ptr != '(' || *end_ptr == *next_token)
-                goto err;
-        next_token = end_ptr + 1;
+                        loc->priv->latitude = g_ascii_strtod (next_token, &end_ptr);
+                        if (*end_ptr != ',' || *end_ptr == *params)
+                                goto err;
+                        next_token = end_ptr + 1;
 
-        if ((token_end = strchr (next_token, ')')) == NULL)
-                goto err;
+                        loc->priv->longitude = g_ascii_strtod (next_token, &end_ptr);
+                        if (*end_ptr == *next_token)
+                                goto err;
 
-        description_len = token_end - next_token;
-        if (description_len <= 0)
-            goto err;
+                        if (*end_ptr != '(' || *end_ptr == *next_token)
+                                goto err;
+                        next_token = end_ptr + 1;
 
-        description = g_uri_unescape_segment (next_token,
-                                              next_token + description_len,
-                                              NULL);
-        geocode_location_set_description (loc, description);
-        g_free (description);
-        return TRUE;
+                        description = next_token;
+
+                        if ((end_ptr = strchr (next_token, ')')) == NULL)
+                                goto err;
+                        next_token = end_ptr + 1;
+
+                        description_len = end_ptr - description;
+
+                        if (*next_token != '&' && *next_token != '\0')
+                                goto err;
+                } else if (g_str_has_prefix (parameters[i], "z=")) {
+                    // zoom level is a valid argument, but not supported yet
+                } else {
+                    goto err;
+                }
+        }
+
+        if (description != NULL) {
+                if (description_len <= 0)
+                        goto err;
+
+                description_unescaped = g_uri_unescape_segment (description,
+                                                                description + description_len,
+                                                                NULL);
+                geocode_location_set_description (loc, description_unescaped);
+                g_free (description_unescaped);
+        }
+        goto out;
 
  err:
+        ret = FALSE;
         g_set_error_literal (error,
                              GEOCODE_ERROR,
                              GEOCODE_ERROR_PARSE,
                              "Failed to parse geo URI parameters");
-        return FALSE;
+ out:
+        g_strfreev (parameters);
+        return ret;
 }
 
 /*
@@ -300,42 +331,38 @@ parse_geo_uri_parameters (GeocodeLocation *loc,
         char *val;
         char *u = NULL;
         char *crs = NULL;
+        int i;
         int ret = TRUE;
 
-        parameters = g_strsplit (params, ";", 2);
+        parameters = g_strsplit (params, ";", 256);
         if (parameters[0] == NULL)
                 goto err;
 
-        if (g_str_has_prefix (parameters[0], "u=")) {
-                /*
-                 * if u parameter is first, then there should not be any more
-                 * parameters.
-                 */
-                if (parameters[1] != NULL)
-                        goto err;
-
-                u = parameters[0];
-        } else if (g_str_has_prefix (parameters[0], "crs=")) {
-                /*
-                 * if crs parameter is first, then the next should be the u
-                 * parameter or none.
-                 */
-                crs = parameters[0];
-                if (parameters[1] != NULL){
-
-                        if (!g_str_has_prefix (parameters[1], "u="))
+        for (i = 0; parameters[i] != NULL; i++) {
+                if (g_str_has_prefix (parameters[i], "crs=")) {
+                        /*
+                         * if crs parameter is given, it has to be the first one
+                         */
+                        if (i != 0)
                                 goto err;
 
-                        u = parameters[1];
+                        crs = parameters[i];
+                } else if (g_str_has_prefix (parameters[i], "u=")) {
+                        /*
+                         * u parameter is either first one or after crs parameter and
+                         * has to appear only once in the parameter list
+                         */
+                        if ((crs == NULL && i != 0) || (crs != NULL && i != 1) || u != NULL)
+                                goto err;
+
+                        u = parameters[i];
                 }
-        } else {
-                goto err;
         }
 
         if (u != NULL) {
                 val = u + 2; /* len of 'u=' */
                 loc->priv->accuracy = g_ascii_strtod (val, &endptr);
-                if (*endptr != '\0')
+                if (*endptr != '\0' && *endptr != ';')
                         goto err;
         }
 
@@ -353,8 +380,8 @@ parse_geo_uri_parameters (GeocodeLocation *loc,
                              GEOCODE_ERROR_PARSE,
                              "Failed to parse geo URI parameters");
  out:
-       g_strfreev (parameters);
-       return ret;
+        g_strfreev (parameters);
+        return ret;
 }
 
 /*
@@ -696,11 +723,12 @@ geocode_location_new_with_description (gdouble     latitude,
  *
  * - geo:latitude,longitude
  *
- * An <ulink
+ * Some <ulink
  * url="http://developer.android.com/guide/components/intents-common.html#Maps">
- * Android extension</ulink> to set a description is also supported in the form of:
+ * Android extensions</ulink> are also supported in the form of:
  *
  * - geo:0,0?q=latitude,longitude(description)
+ * - geo:latitude,longitude?z=zoom
  *
  * Returns: %TRUE on success and %FALSE on error.
  **/
