@@ -43,7 +43,10 @@ static struct uri uris[] = {
     { "geo:0,0?q=13.36,-4242(description)", TRUE },
     { "geo:1,2?q=13.36,4242(description)", FALSE },
     { "geo:0,0?q=13.36,4242(description", FALSE },
-    { "geo:0,0?q=13.36,4242()", FALSE }
+    { "geo:0,0?q=13.36,4242()", FALSE },
+    { "geo:13.36,42.42?z=3", TRUE },
+    { "geo:13.36,42.42?u=5", FALSE },
+    { "geo:13.36,42.42?q=description", FALSE }
 };
 
 static void
